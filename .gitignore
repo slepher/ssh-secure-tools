@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+keys/
+dumps/
+outputs/
+*.log
+*.pem
+*.key
+id_ed25519*
+id_ecdsa*
+*.cnf

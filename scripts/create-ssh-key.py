@@ -1,0 +1,1 @@
+../skills/ssh-key-management/scripts/create-ssh-key.py

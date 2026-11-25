@@ -1,0 +1,260 @@
+#!/bin/zsh -f
+# OpenSSH's client log is separate from remote stdout and stderr.
+umask 077
+
+ssh_bin="${SSH_CONNECT_SSH:-ssh}"
+ssh_agent_bin="${SSH_CONNECT_SSH_AGENT:-ssh-agent}"
+ssh_add_bin="${SSH_CONNECT_SSH_ADD:-ssh-add}"
+askpass_bin="${SSH_CONNECT_ASKPASS:-/usr/bin/true}"
+
+pkcs11_module=""
+pkcs11_pubkey=""
+auth_reason="${SSH_CONNECT_AUTH_REASON:-}"
+
+while (( $# > 0 )); do
+  case "$1" in
+    --auth-reason)
+      if (( $# < 2 )); then
+        print -u2 'ssh-connect: --auth-reason requires a text argument'
+        exit 2
+      fi
+      auth_reason="$2"
+      shift 2
+      ;;
+    --auth-reason=*)
+      auth_reason="${1#*=}"
+      shift
+      ;;
+    --secure-ecdsa-dir)
+      if (( $# < 2 )); then
+        print -u2 'ssh-connect: --secure-ecdsa-dir requires a directory path'
+        exit 2
+      fi
+      pkcs11_module="$2/keychain-pkcs11.dylib"
+      pkcs11_pubkey="$2/id_ecdsa.pub"
+      shift 2
+      ;;
+    --secure-ecdsa-dir=*)
+      dir="${1#*=}"
+      pkcs11_module="$dir/keychain-pkcs11.dylib"
+      pkcs11_pubkey="$dir/id_ecdsa.pub"
+      shift
+      ;;
+    --pkcs11-module)
+      if (( $# < 2 )); then
+        print -u2 'ssh-connect: --pkcs11-module requires a file path'
+        exit 2
+      fi
+      pkcs11_module="$2"
+      shift 2
+      ;;
+    --pkcs11-module=*)
+      pkcs11_module="${1#*=}"
+      shift
+      ;;
+    --pkcs11-pubkey)
+      if (( $# < 2 )); then
+        print -u2 'ssh-connect: --pkcs11-pubkey requires a file path'
+        exit 2
+      fi
+      pkcs11_pubkey="$2"
+      shift 2
+      ;;
+    --pkcs11-pubkey=*)
+      pkcs11_pubkey="${1#*=}"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ -n "$pkcs11_module" || -n "$pkcs11_pubkey" ]]; then
+  if [[ -z "$pkcs11_module" || -z "$pkcs11_pubkey" ]]; then
+    print -u2 'ssh-connect: --pkcs11-module and --pkcs11-pubkey must be provided together'
+    exit 2
+  fi
+  if [[ ! -f "$pkcs11_module" || ! -r "$pkcs11_module" ]]; then
+    print -u2 "ssh-connect: PKCS#11 module not readable: $pkcs11_module"
+    exit 2
+  fi
+  if [[ ! -f "$pkcs11_pubkey" || ! -r "$pkcs11_pubkey" ]]; then
+    print -u2 "ssh-connect: PKCS#11 public key not readable: $pkcs11_pubkey"
+    exit 2
+  fi
+fi
+
+# Reject caller-supplied -E so OpenSSH does not override our diagnostic log file.
+has_control_master=0
+ssh_target=""
+ssh_user=""
+i=1
+while (( i <= $# )); do
+  arg="${argv[i]}"
+  case "$arg" in
+    --)
+      (( i++ ))
+      if (( i <= $# )); then
+        ssh_target="${argv[i]}"
+      fi
+      break
+      ;;
+    -E|-E*)
+      print -u2 'ssh-connect: do not pass -E; ssh-connect manages the OpenSSH client log internally'
+      exit 2
+      ;;
+    -M|-S|-S*)
+      has_control_master=1
+      if [[ "$arg" == "-S" ]]; then
+        (( i++ ))
+      fi
+      ;;
+    -l|-l*|-o|-o*)
+      option="${arg[1,2]}"
+      value="${arg[3,-1]}"
+      if [[ -z "$value" ]]; then
+        (( i++ ))
+        value="${argv[i]}"
+      fi
+      if [[ "$option" == -l ]]; then
+        ssh_user="$value"
+      elif [[ -z "$ssh_user" && "$value" =~ '^([Uu][Ss][Ee][Rr])([[:space:]]*=[[:space:]]*|[[:space:]]+)([^[:space:]]+)$' ]]; then
+        ssh_user="$match[3]"
+      fi
+      ;;
+    -[BbcDeFIiJLmOpQRSWw])
+      (( i++ ))
+      ;;
+    -*)
+      ;;
+    *)
+      ssh_target="$arg"
+      break
+      ;;
+  esac
+  (( i++ ))
+done
+
+keep_log=0
+if [[ -n "${SSH_CONNECT_LOG_FILE:-}" ]]; then
+  log="$SSH_CONNECT_LOG_FILE"
+  : > "$log" || exit 1
+  keep_log=1
+else
+  log=$(mktemp "${TMPDIR:-/tmp}/ssh-connect.XXXXXXXX") || exit 1
+fi
+
+agent_started=0
+cleanup() {
+  if (( agent_started )); then
+    eval "$("$ssh_agent_bin" -k)" >/dev/null 2>&1
+  fi
+  if (( ! keep_log )); then
+    rm -f -- "$log"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+extra_ssh_args=()
+if [[ -n "$pkcs11_module" ]]; then
+  expected_blob="$(awk '{print $2; exit}' "$pkcs11_pubkey")"
+  if [[ -z "$expected_blob" ]]; then
+    print -u2 "ssh-connect: invalid public key file: $pkcs11_pubkey"
+    exit 2
+  fi
+
+  prompt_host="${ssh_target#ssh://}"
+  if [[ "$prompt_host" == *@* ]]; then
+    ssh_user="${ssh_user:-${prompt_host%@*}}"
+    prompt_host="${prompt_host##*@}"
+  fi
+  auth_prompt="
+配置：${SSH_CONNECT_PROFILE:-${prompt_host:-未知}}
+连接方式：${SSH_CONNECT_METHOD:-SSH}"
+  if [[ -n "$ssh_user" ]]; then
+    auth_prompt+="
+用户名：${ssh_user}"
+  fi
+  auth_prompt+="
+服务器：${prompt_host:-未知}"
+  if [[ -n "${SSH_CONNECT_DB_SERVER:-}" ]]; then
+    auth_prompt+="
+数据库用户名：${SSH_CONNECT_DB_USER}
+数据库服务器：${SSH_CONNECT_DB_SERVER}"
+  fi
+  if [[ -n "$auth_reason" ]]; then
+    auth_prompt+="
+用途：${auth_reason}"
+  fi
+  export KEYCHAIN_PKCS11_PROMPT="$auth_prompt"
+
+  agent_env="$("$ssh_agent_bin" -s -P "$pkcs11_module")" || {
+    print -u2 'ssh-connect: failed to start isolated ssh-agent'
+    exit 1
+  }
+  eval "$agent_env" >/dev/null || exit 1
+  agent_started=1
+
+  SSH_ASKPASS="$askpass_bin" SSH_ASKPASS_REQUIRE=force \
+    "$ssh_add_bin" -s "$pkcs11_module" >/dev/null || {
+      print -u2 "ssh-connect: failed to load PKCS#11 module: $pkcs11_module"
+      exit 1
+    }
+
+  listed="$("$ssh_add_bin" -L 2>/dev/null)" || listed=""
+  found_expected=0
+  if [[ -n "$listed" ]]; then
+    while IFS= read -r identity; do
+      [[ -z "$identity" ]] && continue
+      blob="$(awk '{print $2; exit}' <<< "$identity")"
+      if [[ "$blob" == "$expected_blob" ]]; then
+        found_expected=1
+      else
+        "$ssh_add_bin" -d /dev/stdin <<< "$identity" >/dev/null 2>&1 || true
+      fi
+    done <<< "$listed"
+  fi
+
+  if (( ! found_expected )); then
+    print -u2 "ssh-connect: target public key was not exposed by PKCS#11 module: $pkcs11_pubkey"
+    exit 1
+  fi
+
+  extra_ssh_args+=(
+    -o IdentitiesOnly=yes
+    -o ForwardAgent=no
+    -o "IdentityAgent=$SSH_AUTH_SOCK"
+    -i "$pkcs11_pubkey"
+  )
+  if (( ! has_control_master )); then
+    extra_ssh_args+=(-o ControlPath=none)
+  fi
+fi
+
+"$ssh_bin" -E "$log" "${extra_ssh_args[@]}" "$@"
+rc=$?
+cat -- "$log" >&2
+if (( rc == 255 )); then
+  # Providers sometimes report only a generic signing error after cancellation.
+  # Attribute cancellation only when the signing diagnostic explicitly says so.
+  if LC_ALL=C grep -Eiq '^sign_and_send_pubkey: signing failed.*(user cancel(l)?ed|operation cancel(l)?ed|user denied|user rejected)' "$log"; then
+    print -u2 'SSH_AUTH_REJECTED: 本机签名授权已被拒绝或取消。'
+    exit 77
+  fi
+  if LC_ALL=C grep -Eq '^sign_and_send_pubkey: signing failed .* from agent: agent refused operation[[:space:]]*$' "$log"; then
+    print -u2 'SSH_AUTH_REJECTED: 本机签名代理拒绝了签名请求（可能已取消指纹验证）。'
+    exit 77
+  fi
+  if LC_ALL=C grep -Eq '^sign_and_send_pubkey: signing failed' "$log"; then
+    print -u2 'SSH_SIGNING_FAILED: 本机密钥签名失败，无法确认是否由指纹拒绝引起。'
+  fi
+fi
+exit "$rc"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "连接操作审阅"
+  short_description: "Review SSH and MySQL operations by environment"
+  default_prompt: "Use $connection-operation-review to complete the requested task."

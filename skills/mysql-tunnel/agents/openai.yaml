@@ -1,0 +1,4 @@
+interface:
+  display_name: "MySQL 安全隧道"
+  short_description: "Connect to MySQL through isolated SSH tunnels and Keychain"
+  default_prompt: "Use $mysql-tunnel to complete the requested task."

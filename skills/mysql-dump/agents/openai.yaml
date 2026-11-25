@@ -1,0 +1,4 @@
+interface:
+  display_name: "MySQL 导出"
+  short_description: "Dump MySQL tables and verify filtered export contents"
+  default_prompt: "Use $mysql-dump to complete the requested task."

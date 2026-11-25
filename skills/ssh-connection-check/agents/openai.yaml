@@ -1,0 +1,4 @@
+interface:
+  display_name: "SSH 连接检查"
+  short_description: "Inspect SSH versions, identities and Touch ID authentication"
+  default_prompt: "Use $ssh-connection-check to complete the requested task."
