@@ -1,4 +1,0 @@
-interface:
-  display_name: "SSH 密钥管理"
-  short_description: "Create and rotate file-backed or Secure Enclave SSH keys"
-  default_prompt: "Use $ssh-key-management to complete the requested task."

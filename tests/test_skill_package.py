@@ -7,7 +7,7 @@ import tempfile
 
 project = Path(__file__).resolve().parents[1]
 expected = {
-    'connection-operation-review', 'ssh-key-management',
+    'connection-operation-review',
     'ssh-connection-check', 'mysql-tunnel', 'mysql-dump',
 }
 assert {path.name for path in (project / 'skills').iterdir()} == expected
@@ -28,9 +28,5 @@ with tempfile.TemporaryDirectory(prefix='ssh-skills-check-') as temporary:
         check=True, capture_output=True, text=True,
     )
     assert Path(result.stdout.strip()).resolve() == script.parent.resolve(), 'Copied skill still depends on project path'
-    subprocess.run(
-        ['python3', str(copied / 'ssh-key-management/scripts/create-ssh-key.py'), '--help'],
-        check=True, stdout=subprocess.DEVNULL,
-    )
 
-print('PASS: five portable skill directories; all resources resolve; copied runtime loads')
+print(f'PASS: {len(expected)} portable skill directories; all resources resolve; copied runtime loads')

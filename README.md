@@ -2,14 +2,14 @@
 
 macOS 上的 SSH 密钥管理、Secure Enclave 硬件认证、MySQL 独立安全隧道与数据导出工具集，以及配套的 agent skills。
 
-根目录 `scripts/` 是指向 `skills/` 内脚本的符号链接入口，保持单一源码。
+根目录 `scripts/` 提供命令入口。连接和隧道脚本通过符号链接复用 `skills/` 内的实现。
 
 | 模块 | 入口 | 用途 |
 | :--- | :--- | :--- |
 | SSH 连接封装 | `scripts/ssh-connect` | 隔离 `ssh-agent` 管理、Touch ID 自定义弹窗文案、硬件签名拒绝精准诊断 |
 | MySQL 安全隧道 | `scripts/mysql-tunnel.zsh` | 独立 Unix socket 隧道、自动凭据读取与退出清理（查询 / TSV / Dump） |
 | SSH 密钥管理 | `scripts/create-ssh-key.py` | 创建/归档轮换 Ed25519、原生 `sk-ecdsa` 与 PKCS#11 `ecdsa-sha2-nistp256` 密钥 |
-| Agent Skills | `skills/*` | 5 个可独立分发的连接审阅、诊断、密钥管理与 MySQL 隧道/导出技能 |
+| Agent Skills | `skills/*` | 4 个可独立分发的连接审阅、诊断与 MySQL 隧道/导出技能 |
 
 ---
 
@@ -71,20 +71,21 @@ scripts/ssh-connect --auth-reason "Deploy -> prod_gw" \
 
 ### `keychain-pkcs11` 兼容性与本地构建
 
-| `keychain-pkcs11` 分支 | 自定义弹窗文案 | 空 PIN 兼容 | 取消授权识别 |
+| `keychain-pkcs11` 版本 | 自定义弹窗文案 | 加载模块时的 PIN 行为 | 取消授权识别 |
 | :--- | :--- | :--- | :--- |
-| **原生上游**（`bazuchan/keychain-pkcs11`） | 忽略 `KEYCHAIN_PKCS11_PROMPT`，显示系统默认文案 | 通过 `SSH_ASKPASS` 自动兼容 | `agent refused operation` → `SSH_AUTH_REJECTED`（`77`） |
-| **仅添加 ECDSA / Ed25519 的分支** | 忽略 `KEYCHAIN_PKCS11_PROMPT`；配合 `--pkcs11-module` + `--pkcs11-pubkey` 支持 `id_ecdsa.pub` / `id_ed25519.pub` | 通过 `SSH_ASKPASS` 自动兼容 | `agent refused operation` → `SSH_AUTH_REJECTED`（`77`） |
-| **带自定义弹窗 / 免复用 / 取消文案补丁的分支** | 读取 `KEYCHAIN_PKCS11_PROMPT` 展示完整连接信息，且禁止 Touch ID 复用 | 免空 PIN 报错 | 明确取消文本（如 `user cancelled` / `Operation cancelled`）与 `agent refused operation` 均识别为 `SSH_AUTH_REJECTED`（`77`） |
+| **原始上游及仅添加 ECDSA / Ed25519 的分支** | 显示系统默认文案 | `ssh-connect` 通过 `SSH_ASKPASS` 提交空输入，非交互加载仍可能报 `pin required` | `agent refused operation` → `SSH_AUTH_REJECTED`（`77`） |
+| **[slepher/keychain-pkcs11](https://github.com/slepher/keychain-pkcs11)** | 读取 `KEYCHAIN_PKCS11_PROMPT` 展示连接信息，且禁止 Touch ID 复用 | 未启用 `askPIN` 时可在无 PIN 的情况下加载，签名授权由 macOS 处理 | 明确取消文本（如 `user cancelled` / `Operation cancelled`）与 `agent refused operation` 均识别为 `SSH_AUTH_REJECTED`（`77`） |
 
-编译产物 `.dylib` 不提交进本仓库，需在独立的 `keychain-pkcs11` 仓库打补丁后于本机编译并签名：
+从 GitHub 克隆修改版，在本机编译并签名。
 
 ```zsh
-cd /path/to/keychain-pkcs11
-git apply ssh-secure-tools.patch
-./autogen.sh && ./configure && make
-codesign --force --sign - .libs/keychain-pkcs11.dylib
+git clone git@github.com:slepher/keychain-pkcs11.git
+cd keychain-pkcs11
+./autogen.sh && ./configure && make &&
+  codesign --force --sign - .libs/keychain-pkcs11.dylib
 ```
+
+使用 `--pkcs11-module` 时，指定生成的 `.libs/keychain-pkcs11.dylib` 的绝对路径。使用 `--secure-ecdsa-dir` 时，将动态库和公钥放在同一个目录。
 
 ---
 
@@ -190,7 +191,8 @@ ssh-keygen -p -f "$HOME/.ssh/id_ed25519"
 ### 安全与轮换说明
 
 - `--archive-dir` 由调用者指定且必须为空或不存在；脚本会先完成旧文件归档并校验一致性，再创建新密钥并原子替换，避免归档失败留下孤儿 CTK identity。
-- 密钥创建不会自动注册远端 `authorized_keys`。
+- 为已有普通私钥修改口令时，公钥指纹保持不变。每份私钥副本的口令需分别修改，已加载到 SSH agent 的副本需单独移除或重新加载。
+- 注册远端公钥时，先核对目标用户和新旧公钥指纹，备份原有的 `authorized_keys`。加入新公钥后，用指定的新身份建立一次全新连接并验证登录，再按授权移除对应的旧公钥。文件私钥和原生 `sk-ecdsa` 应禁用 SSH agent 和连接复用；PKCS#11 使用 [`ssh-connect`](#ssh-连接ssh-connect) 管理独立的 agent。
 - Secure Enclave 私钥由当前 Mac 的硬件芯片保管，无法导出，迁移设备需重新生成并配置公钥；若创建途中失败，请先用 `sc_auth list-ctk-identities` 核对状态后再重试。
 
 ---
@@ -209,10 +211,9 @@ python3 tests/test_skill_package.py
 
 ## 项目 Skills 与安装
 
-`skills/` 目录包含 5 个可独立分发的 agent skills：
+`skills/` 目录包含 4 个可独立分发的 agent skills：
 
 - `connection-operation-review`：SSH/Bash 与 MySQL 操作的前置环境分类与单文件审阅约定（独占测试环境按需展示；非独占测试与正式环境须先完整展示操作文件及执行命令后再执行，内容变更后重新展示）。
-- `ssh-key-management`：SSH 密钥创建、口令管理、归档轮换与远端公钥注册。
 - `ssh-connection-check`：SSH 别名解析、版本检查与 Touch ID / 密钥认证验证。
 - `mysql-tunnel`：MySQL 安全隧道连接与 SQL 执行。
 - `mysql-dump`：基于 MySQL Shell `dumpTables()` 的表级过滤导出与结果校验。
