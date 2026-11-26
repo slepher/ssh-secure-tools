@@ -1,8 +1,8 @@
 # ssh-secure-tools
 
-macOS 上的 SSH 密钥管理、Secure Enclave 硬件认证、MySQL 独立安全隧道与数据导出工具集，以及配套的 agent skills。
+面向 macOS 的 SSH 密钥管理、Secure Enclave 硬件认证、MySQL 独立安全隧道与数据导出工具集，以及配套的 Agent Skills。
 
-根目录 `scripts/` 提供命令入口。连接和隧道脚本通过符号链接复用 `skills/` 内的实现。
+根目录 `scripts/` 提供命令行入口，其中连接与隧道脚本通过符号链接复用 `skills/` 内的实现。
 
 | 模块 | 入口 | 用途 |
 | :--- | :--- | :--- |
@@ -15,27 +15,27 @@ macOS 上的 SSH 密钥管理、Secure Enclave 硬件认证、MySQL 独立安全
 
 ## 环境依赖
 
-- **基础工具**：Zsh、Python 3、OpenSSH（`ssh` / `ssh-agent` / `ssh-add` 按 `PATH` 顺序查找，`create-ssh-key.py` 使用 `/usr/bin/ssh-keygen`）与 macOS 系统 `security`（`/usr/bin/security`）。
+- **基础工具**：Zsh、Python 3、OpenSSH（`ssh` / `ssh-agent` / `ssh-add` 按 `PATH` 顺序查找，`create-ssh-key.py` 使用 `/usr/bin/ssh-keygen`）以及 macOS 系统 `security`（`/usr/bin/security`）。
 - **MySQL 隧道与导出**：标准 `mysql` 客户端、`mysqldump` 与 `my_print_defaults`（通常随 `mysql-client` 一并提供，用于解析 `~/.my.cnf`）即可完成查询、TSV 输出和传统 SQL 导出，**不强依赖 `mysqlsh`**；仅在使用 `mysql_tunnel --dump/-d`（`util.dumpTables()`）或 `--js`/`--py` 时需要安装 MySQL Shell（`mysqlsh` 及其 `mysql-secret-store-keychain`）。
-- **Secure Enclave 认证**：支持 `create-ctk-identity` 的 `sc_auth`、已录入的 Touch ID；原生 `sk-ecdsa` 模式依赖 Apple `/usr/lib/ssh-keychain.dylib`，标准 `ecdsa-sha2-nistp256` 模式依赖 `keychain-pkcs11` 模块。
+- **Secure Enclave 认证**：支持 `create-ctk-identity` 的 `sc_auth` 与已录入的 Touch ID；原生 `sk-ecdsa` 模式依赖 Apple `/usr/lib/ssh-keychain.dylib`，标准 `ecdsa-sha2-nistp256` 模式依赖 `keychain-pkcs11.dylib`（见下文[获取方式](#keychain-pkcs11-兼容性下载与构建)，可直接下载预编译动态库或从源码编译）。
 
 ---
 
 ## 快速开始
 
-在当前终端加载 MySQL 隧道命令（也可将这行加入 `~/.zshrc`）：
+在当前终端中加载 MySQL 隧道命令（也可将下行加入 `~/.zshrc` 以持久生效）：
 
 ```zsh
 source "$HOME/project/ssh-secure-tools/scripts/mysql-tunnel.zsh"
 ```
 
-脚本会根据自身所在路径自动定位凭据 helper 和 `ssh-connect`。如需独立部署，可将 `mysql-tunnel.zsh`、`mysql-tunnel-credentials.py` 与可执行的 `ssh-connect` 三个文件一起放入 `~/.zsh/` 后加载。
+脚本会根据自身路径自动定位凭据 helper 与 `ssh-connect`。如需独立部署，可将 `mysql-tunnel.zsh`、`mysql-tunnel-credentials.py` 以及具备可执行权限的 `ssh-connect` 一并放入 `~/.zsh/` 后再加载。
 
 ---
 
 ## SSH 连接（`ssh-connect`）
 
-`scripts/ssh-connect` 封装了系统 OpenSSH，在保留原始诊断输出的同时，区分本机硬件签名拒绝与其他连接失败：
+`scripts/ssh-connect` 封装了系统 OpenSSH，在保留原始诊断输出的同时，准确区分本机硬件签名拒绝与其他连接失败：
 
 ```zsh
 # 普通 SSH 或原生 Secure Enclave（sk-ecdsa）连接
@@ -57,35 +57,50 @@ scripts/ssh-connect --auth-reason "Deploy -> prod_gw" \
 
 ### 行为说明
 
-- **自动管理隔离 `ssh-agent`**：使用 `--secure-ecdsa-dir`（或 `--pkcs11-module` + `--pkcs11-pubkey`）时，脚本会自动启动仅允许该模块的独立 `ssh-agent -P`、过滤移除本机其他无关 CTK 身份、强制 `IdentitiesOnly=yes` 与 `ForwardAgent=no`，并在退出或收到中断信号时自动回收 `ssh-agent`。
+- **自动管理隔离 `ssh-agent`**：使用 `--secure-ecdsa-dir`（或 `--pkcs11-module` + `--pkcs11-pubkey`）时，脚本会自动启动仅允许加载该模块的独立 `ssh-agent -P`，过滤移除本机其他无关 CTK 身份，强制启用 `IdentitiesOnly=yes` 与 `ForwardAgent=no`，并在退出或收到中断信号时自动回收 `ssh-agent`。
 - **Touch ID 自定义弹窗文案（`KEYCHAIN_PKCS11_PROMPT`）**：
-  - 在 PKCS#11 模式下，启动独立 `ssh-agent` 前会自动导出 `KEYCHAIN_PKCS11_PROMPT`（由 `ssh-pkcs11-helper` 继承）：
-    - 文案以换行开头，依次显示配置、连接方式、用户名和服务器；直接 SSH 连接以目标名作为配置和服务器，仅在显式指定 SSH 用户时显示用户名。
-    - 传入 `--auth-reason TEXT` 或 `SSH_CONNECT_AUTH_REASON` 时另起一行显示“用途：TEXT”。
-    - MySQL 隧道以 profile 名作为配置，用户名与服务器显示 SSH 网关信息，随后另列数据库用户名与数据库服务器（`主机:端口`），连接方式区分“MySQL SSH 隧道”与“MySQL 导出 SSH 隧道”。
+  - 在 PKCS#11 模式下，脚本会在启动独立 `ssh-agent` 前自动导出 `KEYCHAIN_PKCS11_PROMPT`（由 `ssh-pkcs11-helper` 继承）：
+    - 文案以换行开头，依次展示配置、连接方式、用户名和服务器；直接 SSH 连接以目标名作为配置和服务器，仅在显式指定 SSH 用户时展示用户名。
+    - 传入 `--auth-reason TEXT` 或 `SSH_CONNECT_AUTH_REASON` 时，会另起一行显示“用途：TEXT”。
+    - MySQL 隧道场景以 profile 名作为配置，用户名与服务器展示 SSH 网关信息，随后另列数据库用户名与数据库服务器（`主机:端口`），并在连接方式中区分“MySQL SSH 隧道”与“MySQL 导出 SSH 隧道”。
 - **诊断与退出码**：
-  - OpenSSH 明确报告本机签名被拒绝或取消（含 `from agent: agent refused operation`）时，在 stderr 输出 `SSH_AUTH_REJECTED` 并返回退出码 `77`（`agent refused operation` 仅表示代理拒绝签名，具体原因由本机认证组件掌握）。
-  - 其他本机签名失败时输出 `SSH_SIGNING_FAILED` 并保留退出码 `255`。
-  - 远端命令本身也可能返回 `77`，调用方应同时核对 stderr 诊断标记。
-- **参数限制**：`ssh-connect` 内部使用 `-E` 捕获 OpenSSH 客户端日志，调用时不要额外传入 `-E`。
+  - 当 OpenSSH 明确报告本机签名被拒绝或取消（含 `from agent: agent refused operation`）时，在 `stderr` 输出 `SSH_AUTH_REJECTED` 并返回退出码 `77`（`agent refused operation` 仅表示代理拒绝签名，具体原因由本机认证组件掌握）。
+  - 其他本机签名失败会输出 `SSH_SIGNING_FAILED` 并保留退出码 `255`。
+  - 由于远端命令本身也可能返回 `77`，调用方应同时核对 `stderr` 中的诊断标记。
+- **参数限制**：`ssh-connect` 内部使用 `-E` 捕获 OpenSSH 客户端日志，调用时请勿额外传入 `-E`。
 
-### `keychain-pkcs11` 兼容性与本地构建
+### `keychain-pkcs11` 兼容性、下载与构建
 
 | `keychain-pkcs11` 版本 | 自定义弹窗文案 | 加载模块时的 PIN 行为 | 取消授权识别 |
 | :--- | :--- | :--- | :--- |
 | **原始上游及仅添加 ECDSA / Ed25519 的分支** | 显示系统默认文案 | `ssh-connect` 通过 `SSH_ASKPASS` 提交空输入，非交互加载仍可能报 `pin required` | `agent refused operation` → `SSH_AUTH_REJECTED`（`77`） |
 | **[slepher/keychain-pkcs11](https://github.com/slepher/keychain-pkcs11)** | 读取 `KEYCHAIN_PKCS11_PROMPT` 展示连接信息，且禁止 Touch ID 复用 | 未启用 `askPIN` 时可在无 PIN 的情况下加载，签名授权由 macOS 处理 | 明确取消文本（如 `user cancelled` / `Operation cancelled`）与 `agent refused operation` 均识别为 `SSH_AUTH_REJECTED`（`77`） |
 
-从 GitHub 克隆修改版，在本机编译并签名。
+获取 `keychain-pkcs11.dylib` 有以下**两种方式，按需任选其一即可**：
+
+#### 方式一：直接下载预编译 `.dylib`（推荐）
+
+前往修改版的 [GitHub Releases](https://github.com/slepher/keychain-pkcs11/releases) 页面，选择所需版本，在 **Assets** 中直接下载 `keychain-pkcs11.dylib`。
+
+该预编译文件为通用动态库（Universal Binary），最低系统要求为 Intel（`x86_64`）macOS 10.14 与 Apple Silicon（`arm64`）macOS 11.0。
+
+#### 方式二：从源码本地编译
+
+如果希望自行构建，可在 [slepher/keychain-pkcs11](https://github.com/slepher/keychain-pkcs11) 页面选择 **Code → Download ZIP** 解压进入源码目录，或直接通过 Git 克隆：
 
 ```zsh
 git clone git@github.com:slepher/keychain-pkcs11.git
 cd keychain-pkcs11
+```
+
+在源码目录中编译并执行本地签名，生成 `.libs/keychain-pkcs11.dylib`：
+
+```zsh
 ./autogen.sh && ./configure && make &&
   codesign --force --sign - .libs/keychain-pkcs11.dylib
 ```
 
-使用 `--pkcs11-module` 时，指定生成的 `.libs/keychain-pkcs11.dylib` 的绝对路径。使用 `--secure-ecdsa-dir` 时，将动态库和公钥放在同一个目录。
+> **使用说明**：无论是直接下载还是本地编译，得到的 `keychain-pkcs11.dylib` 用法完全一致。使用 `--pkcs11-module` 时传入该动态库的绝对路径；使用 `--secure-ecdsa-dir` 时，将动态库与对应公钥放在同一目录即可。
 
 ---
 
@@ -93,7 +108,7 @@ cd keychain-pkcs11
 
 ### 配置 Profile
 
-在 `~/.my.cnf` 中为每个 profile 添加一个 `[mysql_tunnel_<名称>]` 组，脚本通过 `my_print_defaults` 读取指定组（可通过环境变量 `MYSQL_TUNNEL_PROFILES_FILE` 指定其他选项文件），项目仓库不内置具体服务器地址或账号：
+在 `~/.my.cnf` 中为每个 profile 添加一个 `[mysql_tunnel_<名称>]` 分组。脚本通过 `my_print_defaults` 读取指定分组（亦可通过环境变量 `MYSQL_TUNNEL_PROFILES_FILE` 指定其他配置文件），仓库本身不内置具体服务器地址或账号：
 
 ```ini
 [mysql_tunnel_staging]
@@ -113,13 +128,13 @@ defaults-suffix=_prod
 pkcs11-dir=~/.ssh/secure-ecdsa
 ```
 
-使用 `keychain:SERVICE` 或 `keychain:SERVICE:ACCOUNT` 凭据源时，可通过 macOS 系统 `security` 命令提前录入密码（交互输入，不落盘进 shell 历史）：
+使用 `keychain:SERVICE` 或 `keychain:SERVICE:ACCOUNT` 凭据源时，可通过 macOS 系统 `security` 命令预先录入密码（交互式输入，不会落盘到 shell 历史记录）：
 
 ```zsh
 security add-generic-password -s staging-mysql -a appuser -w
 ```
 
-环境类别由执行上下文或目标相关 `AGENTS.md` 提供，profile 名称本身不声明独占性。
+环境类别由执行上下文、全局 `AGENTS.md` 或项目级 `AGENTS.md` 指定，profile 名称本身不代表环境独占性（配置方式见下文[在全局 `AGENTS.md` 中配置服务器属性](#在全局-agentsmd-中配置服务器属性)）。
 
 ### 常用命令
 
@@ -140,15 +155,15 @@ mysql_tunnel staging -d app_db orders \
   --outputUrl="$HOME/exports/orders" \
   '--where=app_db.orders=id >= 1000'
 
-# 兼容传统 mysqldump，用于需要导出 SQL 文件的场景
+# 兼容传统 mysqldump，适用于需要导出标准 SQL 文件的场景
 mysqldump_tunnel staging app_db orders > "$HOME/exports/orders.sql"
 ```
 
 ### 隔离与清理机制
 
-- 每次调用均使用独立的临时目录（权限 `0700`）、Unix socket、SSH master（显式关闭 `ForwardAgent` 与 `ControlPersist`）和临时凭据，支持多连接并发互不干扰。
-- **客户端与凭据**：`mysql_tunnel` 默认优先使用标准 `mysql` 客户端（可通过 `MYSQL_TUNNEL_CLIENT=mysqlsh` 指定使用 `mysqlsh`；`--dump`/`-d`/`--js`/`--py` 会自动选用 `mysqlsh`）。`mysql` 与 `mysqldump_tunnel` 使用权限 `0600` 的临时密码文件，密码直接通过 macOS 系统 `/usr/bin/security`（支持 `keychain:SERVICE` / `keychain:SERVICE:ACCOUNT`）或已安装的 `mysql-secret-store-keychain` 读取，不进入命令行参数或环境变量；`mysqlsh` 模式使用临时钥匙串条目并在退出时擦除。
-- 正常退出及收到 `INT`、`TERM`、`HUP` 信号时会自动关闭隧道并清理所有临时资源（强制 `SIGKILL` 或突然断电除外）。
+- **多连接隔离**：每次调用都会创建独立的临时目录（权限 `0700`）、Unix socket、SSH master（显式关闭 `ForwardAgent` 与 `ControlPersist`）及临时凭据，支持多连接并发且互不干扰。
+- **客户端与凭据保护**：`mysql_tunnel` 默认优先使用标准 `mysql` 客户端（可通过 `MYSQL_TUNNEL_CLIENT=mysqlsh` 指定使用 `mysqlsh`；`--dump`/`-d`/`--js`/`--py` 会自动选用 `mysqlsh`）。`mysql` 与 `mysqldump_tunnel` 通过权限 `0600` 的临时密码文件传递密码，密码直接从 macOS `/usr/bin/security`（支持 `keychain:SERVICE` / `keychain:SERVICE:ACCOUNT`）或已安装的 `mysql-secret-store-keychain` 读取，不进入命令行参数或环境变量；`mysqlsh` 模式则使用临时钥匙串条目并在退出时擦除。
+- **自动清理**：正常退出或收到 `INT`、`TERM`、`HUP` 信号时，脚本会自动关闭隧道并清理所有临时资源（强制 `SIGKILL` 或异常断电除外）。
 
 ---
 
@@ -158,11 +173,11 @@ mysqldump_tunnel staging app_db orders > "$HOME/exports/orders.sql"
 
 | 模式（`--type`） | 公钥类型 | 适用场景 |
 | :--- | :--- | :--- |
-| `ed25519`（默认） | `ssh-ed25519` | **适用更广，通用场景优先选用**，支持跨设备迁移和绝大多数 SSH 服务端 |
+| `ed25519`（默认） | `ssh-ed25519` | **兼容性最广，通用场景优先选用**，支持跨设备迁移和绝大多数 SSH 服务端 |
 | `secure-enclave` | `sk-ecdsa-sha2-nistp256@openssh.com` | 需本机 Touch ID 硬件保护，且服务端支持 OpenSSH 8.2+ FIDO/SK 密钥 |
-| `secure-enclave-ecdsa` | `ecdsa-sha2-nistp256` | 需本机 Touch ID 硬件保护，但服务端不支持 `sk-*` 密钥类型（配合 `keychain-pkcs11`） |
+| `secure-enclave-ecdsa` | `ecdsa-sha2-nistp256` | 需本机 Touch ID 硬件保护，但服务端不支持 `sk-*` 密钥类型（配合 `keychain-pkcs11` 使用） |
 
-`ed25519` 模式默认生成无口令密钥；需要口令时加 `--prompt-passphrase`，由 `ssh-keygen` 在终端交互读取。
+`ed25519` 模式默认生成无口令密钥；如需设置口令，可添加 `--prompt-passphrase`，由 `ssh-keygen` 在终端交互读取。
 
 ```zsh
 # 1. 新建普通 Ed25519 密钥（目标文件已存在时会拒绝覆盖）
@@ -190,16 +205,16 @@ ssh-keygen -p -f "$HOME/.ssh/id_ed25519"
 
 ### 安全与轮换说明
 
-- `--archive-dir` 由调用者指定且必须为空或不存在；脚本会先完成旧文件归档并校验一致性，再创建新密钥并原子替换，避免归档失败留下孤儿 CTK identity。
-- 为已有普通私钥修改口令时，公钥指纹保持不变。每份私钥副本的口令需分别修改，已加载到 SSH agent 的副本需单独移除或重新加载。
-- 注册远端公钥时，先核对目标用户和新旧公钥指纹，备份原有的 `authorized_keys`。加入新公钥后，用指定的新身份建立一次全新连接并验证登录，再按授权移除对应的旧公钥。文件私钥和原生 `sk-ecdsa` 应禁用 SSH agent 和连接复用；PKCS#11 使用 [`ssh-connect`](#ssh-连接ssh-connect) 管理独立的 agent。
-- Secure Enclave 私钥由当前 Mac 的硬件芯片保管，无法导出，迁移设备需重新生成并配置公钥；若创建途中失败，请先用 `sc_auth list-ctk-identities` 核对状态后再重试。
+- `--archive-dir` 由调用者指定且必须为空或不存在；脚本会先归档旧文件并校验一致性，再创建新密钥并原子替换，避免归档失败导致留下孤儿 CTK identity。
+- 修改已有普通私钥的口令不会改变公钥指纹。每份私钥副本的口令需分别修改，已加载到 SSH agent 的副本需单独移除或重新加载。
+- 注册远端公钥时，请先核对目标用户及新旧公钥指纹，并备份原有的 `authorized_keys`。写入新公钥后，使用指定的新身份建立全新连接验证登录，确认无误后再按授权移除旧公钥。文件私钥与原生 `sk-ecdsa` 应禁用 SSH agent 和连接复用；PKCS#11 模式请通过 [`ssh-connect`](#ssh-连接ssh-connect) 管理独立 agent。
+- Secure Enclave 私钥由当前 Mac 的硬件安全芯片保管，无法导出，迁移设备时需重新生成并部署公钥；若创建过程中断，请先使用 `sc_auth list-ctk-identities` 核对状态后再重试。
 
 ---
 
 ## 本地测试
 
-所有测试均使用临时目录与本地替身脚本，不连接任何实际服务器或真实凭据：
+所有测试均在临时目录中使用本地替身脚本运行，不会连接任何实际服务器或访问真实凭据：
 
 ```zsh
 python3 tests/test_create_ssh_key.py
@@ -211,16 +226,16 @@ python3 tests/test_skill_package.py
 
 ## 项目 Skills 与安装
 
-`skills/` 目录包含 4 个可独立分发的 agent skills：
+`skills/` 目录包含 4 个可独立分发的 Agent Skills：
 
 - `connection-operation-review`：SSH/Bash 与 MySQL 操作的前置环境分类与单文件审阅约定（独占测试环境按需展示；非独占测试与正式环境须先完整展示操作文件及执行命令后再执行，内容变更后重新展示）。
 - `ssh-connection-check`：SSH 别名解析、版本检查与 Touch ID / 密钥认证验证。
 - `mysql-tunnel`：MySQL 安全隧道连接与 SQL 执行。
 - `mysql-dump`：基于 MySQL Shell `dumpTables()` 的表级过滤导出与结果校验。
 
-每个技能目录是一个独立安装单元：SSH/MySQL 执行类技能依赖 `connection-operation-review`，`mysql-dump` 还依赖 `mysql-tunnel`。skill 属于 agent 执行约定，系统级权限边界仍由运行环境保障。
+每个技能目录均为独立安装单元：SSH/MySQL 执行类技能依赖 `connection-operation-review`，`mysql-dump` 还额外依赖 `mysql-tunnel`。Skill 属于 agent 执行约定，系统级权限边界仍由运行环境本身保障。
 
-安装到 `~/.codex/skills/` 前先检查同名目录，避免覆盖已有配置：
+安装到 `~/.codex/skills/` 前请先检查同名目录，避免覆盖已有配置：
 
 ```zsh
 (
@@ -236,4 +251,25 @@ python3 tests/test_skill_package.py
 )
 ```
 
-安装完成后，可在后续对话中直接使用，也可通过 `~/.codex/skills/mysql-tunnel/scripts/mysql-tunnel.zsh` 加载隧道脚本。
+安装完成后，即可在后续对话中直接使用，也可通过 `~/.codex/skills/mysql-tunnel/scripts/mysql-tunnel.zsh` 加载隧道脚本。
+
+### 在全局 `AGENTS.md` 中配置服务器属性
+
+建议在全局 `AGENTS.md`（如 `~/.codex/AGENTS.md`）或项目级 `AGENTS.md` 中预先声明各 SSH 目标与 MySQL profile 的环境类别（**独占测试**、**非独占测试**或**正式服务器**）。
+
+如果未提前声明：
+
+- 使用 Touch ID / Secure Enclave 认证的目标会被 `connection-operation-review` 默认按**正式服务器**处理；
+- 其他无法判断的目标会先询问环境类别。
+
+一旦被归类为**非独占测试**或**正式服务器**，每次执行远端 Bash 或 SQL 前都会触发单文件审阅流程——在对话中先完整输出待执行的 Bash / SQL 文件内容与实际命令，内容变更后也会重新展示；而明确标注为**独占测试**的服务器则允许按需展示、直接批量操作。
+
+全局 `AGENTS.md` 配置示例：
+
+```markdown
+## 服务器环境属性
+
+- `dev_box` / MySQL profile `dev`：独占测试服务器
+- `staging_gateway` / MySQL profile `staging`：非独占测试服务器
+- `prod_db_gateway` / MySQL profile `prod`：正式服务器
+```
